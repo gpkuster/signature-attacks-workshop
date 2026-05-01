@@ -1,158 +1,147 @@
 # Signature-Related Attacks Workshop
 
-This workshop demonstrates a critical vulnerability in smart contract signature verification systems and how to properly secure them.
+This workshop shows a common signature-verification bug in Solidity and a more realistic way to harden the authorization flow.
 
-## Vulnerability: Missing Validation in ecrecover
+## What This Repo Demonstrates
 
-### Overview
+The vulnerable contract uses `ecrecover` without validating the recovered signer. When `ecrecover` receives invalid parameters, it returns `address(0)` instead of reverting.
 
-The `ecrecover` function in Solidity is used to recover the signer's address from a digital signature. However, when `ecrecover` encounters invalid signature parameters, it returns `address(0)` instead of reverting. If this return value is not properly validated, attackers can exploit the system by providing invalid signatures.
-
-### The Problem
+That creates a dangerous pattern:
 
 ```solidity
-function recover(uint8 v, bytes32 r, bytes32 s, bytes32 hash) external {
-    address signer = ecrecover(hash, v, r, s);
-    // VULNERABILITY: No validation of signer address
-    // Do more stuff with the hash
-}
+address signer = ecrecover(hash, v, r, s);
+// missing validation
+authorizedUsers[user] = true;
 ```
 
-**What happens:**
-- When `ecrecover` receives invalid signature parameters, it returns `address(0)`
-- Without validation, the contract continues execution as if the signature was valid
-- Attackers can provide arbitrary invalid signatures and still pass authorization checks
+If the contract never checks the result, an attacker can submit malformed signature data and still pass the authorization path.
 
-### Attack Scenarios
-
-1. **Invalid Signature Components**: Using `v=0`, `r=0`, `s=0` causes `ecrecover` to return `address(0)`
-2. **Malformed Signatures**: Using invalid `v` values (not 27 or 28) or invalid `s` values
-3. **Replay Attacks**: Reusing valid signatures multiple times (mitigated by hash tracking)
-
-## Files in this Workshop
+## Workshop Structure
 
 ### Vulnerable Contract
-- `src/SignatureAttacks.sol` - Contains `VulnerableSignatureContract` with the vulnerability
+- `src/SignatureAttacks.sol`
+- Demonstrates the `address(0)` / unchecked `ecrecover` issue
 
-### Secure Contract
-- `src/SecureSignatureContract.sol` - Contains `SecureSignatureContract` with proper validation
+### Hardened Contract
+- `src/SecureSignatureContract.sol`
+- Rejects invalid signatures
+- Requires a specific authorized signer
+- Binds the signed payload to:
+  - `address(this)`
+  - `block.chainid`
+  - `user`
+  - `nonce`
+  - `deadline`
+- Prevents replay with `usedHashes`
+- Includes an alternative packed-signature flow in `authorizeUserWithECDSA(...)`
 
 ### Tests
-- `test/SignatureAttacks.t.sol` - Demonstrates the vulnerability exploitation
-- `test/SecureSignatureAttacks.t.sol` - Shows how the secure version prevents attacks
+- `test/SignatureAttacks.t.sol`
+- `test/SecureSignatureAttacks.t.sol`
+
+The secure tests now cover:
+- invalid signatures
+- malformed signatures
+- unauthorized signers
+- expired signatures
+- replay attempts
+- packed-signature validation paths
+- signature malleability checks
+
+## Security Lessons
+
+### 1. Checking `signer != address(0)` Is Necessary but Not Sufficient
+
+That protects against one specific failure mode of `ecrecover`, but a secure authorization system also needs to answer:
+
+- Who is allowed to sign?
+- What exactly was signed?
+- Can the signature be replayed?
+- Can it expire?
+- Is the signature malleable?
+
+### 2. Bind Signatures to Context
+
+The hardened contract computes the authorization hash from:
+
+```solidity
+keccak256(abi.encode(address(this), block.chainid, user, nonce, deadline))
+```
+
+This reduces cross-contract and cross-chain replay risk and ties the signature to a specific authorization action.
+
+### 3. Validate the Signer, Not Just the Signature Shape
+
+A valid signature from the wrong private key should still be rejected.
+
+### 4. Add Replay and Expiry Protection
+
+The secure contract tracks used hashes and rejects signatures after `deadline`.
 
 ## Running the Workshop
 
 ### Prerequisites
+
 - Foundry installed
-- Basic understanding of Solidity and digital signatures
+- Basic Solidity knowledge
 
-### Setup
+### Install dependencies
+
+If `forge-std` is missing, install it from the repo root:
+
 ```bash
-# Clone the repository
-git clone <repository-url>
-cd signature-attacks-workshop
-
-# Install dependencies
-forge install
+forge install foundry-rs/forge-std --no-commit
 ```
 
-### Running Tests
+### Run tests
 
-**Test the vulnerable contract:**
-```bash
-forge test --match-contract SignatureAttacksTest
-```
-
-**Test the secure contract:**
-```bash
-forge test --match-contract SecureSignatureAttacksTest
-```
-
-**Run all tests:**
 ```bash
 forge test
 ```
 
-## Vulnerability Demonstration
+Or run each suite independently:
 
-### Test Results - Vulnerable Contract
-```
-[PASS] testVulnerabilityWithInvalidSignature() 
-[PASS] testVulnerabilityWithMalformedSignature()
-```
-
-These tests pass because the vulnerable contract accepts invalid signatures!
-
-### Test Results - Secure Contract
-```
-[PASS] testRejectsInvalidSignature()
-[PASS] testRejectsMalformedSignature()
+```bash
+forge test --match-contract SignatureAttacksTest
+forge test --match-contract SecureSignatureAttacksTest
 ```
 
-These tests pass because the secure contract properly rejects invalid signatures.
+### Coverage
 
-## The Fix
-
-### 1. Basic Validation
-```solidity
-function secureRecover(uint8 v, bytes32 r, bytes32 s, bytes32 hash) external {
-    address signer = ecrecover(hash, v, r, s);
-    require(signer != address(0), "Invalid signature");
-    // Continue with valid signer
-}
+```bash
+forge coverage
 ```
 
-### 2. Recommended: Use OpenZeppelin's ECDSA Library
-```solidity
-import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+Note: some nightly Foundry builds on macOS may panic during `forge test` / `forge coverage` due to an internal tooling bug unrelated to this repo. If that happens, switch to a stable Foundry release and rerun.
 
-function secureRecoverWithECDSA(bytes memory signature, bytes32 hash) external {
-    address signer = ECDSA.recover(hash, signature);
-    // ECDSA.recover automatically reverts on invalid signatures
-}
+## Expected Outcomes
+
+### Vulnerable Contract
+
+These tests should pass because the contract is intentionally insecure:
+
+```text
+testVulnerabilityWithInvalidSignature
+testVulnerabilityWithMalformedSignature
 ```
 
-### 3. Additional Security Measures
+### Hardened Contract
 
-**Handle Signature Malleability:**
-```solidity
-// Check s value is in the lower half of the curve order
-if (uint256(s) > 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0) {
-    revert("Invalid signature 's' value");
-}
+These tests should pass because the contract rejects unsafe flows:
 
-// Check v value is valid
-if (v != 27 && v != 28) {
-    revert("Invalid signature 'v' value");
-}
-```
-
-**Prevent Replay Attacks:**
-```solidity
-mapping(bytes32 => bool) public usedHashes;
-
-function authorizeUser(...) external {
-    require(!usedHashes[hash], "Hash already used");
-    usedHashes[hash] = true;
-    // ... rest of function
-}
+```text
+testRejectsInvalidSignature
+testRejectsUnauthorizedSigner
+testRejectsExpiredSignature
+testAuthorizeUserWithECDSARejectsReplay
+testAuthorizeUserWithECDSARejectsMalleableS
 ```
 
 ## Key Takeaways
 
-1. **Always validate `ecrecover` results** - Check that the returned address is not `address(0)`
-2. **Use OpenZeppelin's ECDSA library** - It handles edge cases automatically
-3. **Implement replay protection** - Track used hashes to prevent signature reuse
-4. **Handle signature malleability** - Validate `v` and `s` values
-5. **Test thoroughly** - Include tests for invalid signatures, malformed signatures, and replay attacks
-
-## Real-World Impact
-
-This vulnerability has been exploited in several real-world scenarios:
-- Unauthorized access to privileged functions
-- Bypassing authorization checks
-- Gaining admin privileges in governance systems
-- Exploiting token transfer mechanisms
-
-
+1. Never trust raw `ecrecover` output without validation.
+2. Reject `address(0)` recoveries.
+3. Verify that the recovered signer is an authorized signer.
+4. Include contract, chain, nonce and expiry in the signed message.
+5. Protect against replay and signature malleability.
+6. Test both the happy path and the failure paths.
