@@ -7,40 +7,45 @@ pragma solidity ^0.8.13;
  * by properly validating ecrecover results and using OpenZeppelin's ECDSA library.
  */
 contract SecureSignatureContract {
+    address public immutable authorizedSigner;
     mapping(address => bool) public authorizedUsers;
     mapping(bytes32 => bool) public usedHashes;
     
     event UserAuthorized(address indexed user, bytes32 indexed hash);
     event InvalidSignatureRejected(address indexed signer, bytes32 indexed hash);
+
+    constructor(address _authorizedSigner) {
+        require(_authorizedSigner != address(0), "Invalid signer");
+        authorizedSigner = _authorizedSigner;
+    }
     
     /**
      * @dev Secure function that recovers signer from signature with proper validation
      * @param v The v component of the signature
      * @param r The r component of the signature  
      * @param s The s component of the signature
-     * @param hash The hash that was signed
      * @param user The user to authorize
+     * @param nonce Unique value used to prevent replay
+     * @param deadline Expiration timestamp for the signature
      */
     function authorizeUser(
-        uint8 v, 
-        bytes32 r, 
-        bytes32 s, 
-        bytes32 hash,
-        address user
+        uint8 v,
+        bytes32 r,
+        bytes32 s,
+        address user,
+        uint256 nonce,
+        uint256 deadline
     ) external {
-        // SECURE: Proper validation of ecrecover result
+        require(block.timestamp <= deadline, "Signature expired");
+
+        bytes32 hash = getAuthorizationHash(user, nonce, deadline);
         address signer = ecrecover(hash, v, r, s);
         
-        // CRITICAL FIX: Check that ecrecover returned a valid address
         require(signer != address(0), "Invalid signature");
+        require(signer == authorizedSigner, "Unauthorized signer");
         
-        // Check if hash has been used before
         require(!usedHashes[hash], "Hash already used");
-        
-        // Mark hash as used
         usedHashes[hash] = true;
-        
-        // Authorize the user
         authorizedUsers[user] = true;
         
         emit UserAuthorized(user, hash);
@@ -49,22 +54,25 @@ contract SecureSignatureContract {
     /**
      * @dev Alternative secure implementation using OpenZeppelin's ECDSA library
      * This is the recommended approach as it handles all edge cases automatically
+     * @param signature Packed 65-byte signature
+     * @param user The user to authorize
+     * @param nonce Unique value used to prevent replay
+     * @param deadline Expiration timestamp for the signature
      */
     function authorizeUserWithECDSA(
         bytes memory signature,
-        bytes32 hash,
-        address user
+        address user,
+        uint256 nonce,
+        uint256 deadline
     ) external {
-        // This would use OpenZeppelin's ECDSA.recover() which automatically
-        // reverts on invalid signatures
-        // address signer = ECDSA.recover(hash, signature);
-        
-        // For demonstration, we'll use ecrecover with proper validation
+        require(block.timestamp <= deadline, "Signature expired");
         require(signature.length == 65, "Invalid signature length");
+
+        bytes32 hash = getAuthorizationHash(user, nonce, deadline);
         
-        bytes32 r; // 32 bytes
-        bytes32 s; // 32 bytes
-        uint8 v; //2 byte
+        bytes32 r;
+        bytes32 s;
+        uint8 v;
         
         assembly {
             r := mload(add(signature, 32))
@@ -72,25 +80,20 @@ contract SecureSignatureContract {
             v := byte(0, mload(add(signature, 96)))
         }
         
-        // Handle malleability
-        if (uint256(s) > 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0) { // @audit SIGNATURE MALLEABILITY PROTECTION
+        if (uint256(s) > 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0) {
             revert("Invalid signature 's' value");
         }
         
-        if (v != 27 && v != 28) { // v must be either 27 or 28 for legacy Ethereum signatures.
-            revert("Invalid signature 'v' value"); // Some off-chain signing tools may use 0/1 instead, which would need conversion, but this code assumes canonical Ethereum values.
+        if (v != 27 && v != 28) {
+            revert("Invalid signature 'v' value");
         }
         
         address signer = ecrecover(hash, v, r, s);
-        require(signer != address(0), "Invalid signature"); // @audit SIGNATURE VALIDATION PROTECTION
+        require(signer != address(0), "Invalid signature");
+        require(signer == authorizedSigner, "Unauthorized signer");
         
-        // Check if hash has been used before
-        require(!usedHashes[hash], "Hash already used"); // @audit REPLAY ATTACK PROTECTION
-        
-        // Mark hash as used
+        require(!usedHashes[hash], "Hash already used");
         usedHashes[hash] = true;
-        
-        // Authorize the user
         authorizedUsers[user] = true;
         
         emit UserAuthorized(user, hash);
@@ -98,9 +101,8 @@ contract SecureSignatureContract {
     
     /**
      * @dev Function that requires authorization
-     * @param data Some data to process
      */
-    function processData(string memory data) external view returns (bool) {
+    function processData(string memory /* data */) external view returns (bool) {
         require(authorizedUsers[msg.sender], "Not authorized");
         return true;
     }
@@ -138,12 +140,24 @@ contract SecureSignatureContract {
      * @dev Create a hash for authorization
      * @param user The user to authorize
      * @param nonce A unique nonce
+     * @param deadline Expiration timestamp for the signature
      * @return bytes32 The hash to be signed
      */
-    function createAuthorizationHash(
-        address user, 
-        uint256 nonce
-    ) external pure returns (bytes32) {
-        return keccak256(abi.encodePacked(user, nonce));
+    function getAuthorizationHash(
+        address user,
+        uint256 nonce,
+        uint256 deadline
+    ) public view returns (bytes32) {
+        return keccak256(
+            abi.encode(address(this), block.chainid, user, nonce, deadline)
+        );
     }
-} 
+
+    function createAuthorizationHash(
+        address user,
+        uint256 nonce,
+        uint256 deadline
+    ) external view returns (bytes32) {
+        return getAuthorizationHash(user, nonce, deadline);
+    }
+}

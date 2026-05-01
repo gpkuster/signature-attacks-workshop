@@ -63,7 +63,7 @@ contract SignatureAttacksTest is Test {
         assertTrue(vulnerableContract.isAuthorized(attacker));
     }
     
-    function testRecoverSignerWithInvalidSignature() public {
+    function testRecoverSignerWithInvalidSignature() public view {
         // Test the recoverSigner function with invalid signature
         uint8 v = 0;
         bytes32 r = bytes32(0);

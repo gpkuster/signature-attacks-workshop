@@ -5,62 +5,67 @@ import "forge-std/Test.sol";
 import "../src/SecureSignatureContract.sol";
 
 contract SecureSignatureAttacksTest is Test {
+    uint256 internal constant ALICE_PK = 1;
+    uint256 internal constant ATTACKER_PK = 2;
+
     SecureSignatureContract public secureContract;
     
     // Test accounts
-    address public alice = address(0x1);
-    address public bob = address(0x2);
-    address public attacker = address(0x3);
+    address public alice;
+    address public bob = address(0xB0B);
+    address public attacker;
     
     function setUp() public {
-        secureContract = new SecureSignatureContract();
+        alice = vm.addr(ALICE_PK);
+        attacker = vm.addr(ATTACKER_PK);
+        secureContract = new SecureSignatureContract(alice);
+    }
+
+    function _signPacked(
+        uint256 privateKey,
+        bytes32 hash
+    ) internal returns (bytes memory signature) {
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(privateKey, hash);
+        return abi.encodePacked(r, s, v);
     }
     
     function testValidSignature() public {
-        // Create a valid signature
-        bytes32 hash = secureContract.createAuthorizationHash(bob, 1);
+        uint256 nonce = 1;
+        uint256 deadline = block.timestamp + 1 days;
+        bytes32 hash = secureContract.getAuthorizationHash(bob, nonce, deadline);
         
-        // Sign the hash with Alice's private key
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(1, hash); // private key 1 corresponds to alice
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(ALICE_PK, hash);
         
-        // Authorize Bob using Alice's signature
-        secureContract.authorizeUser(v, r, s, hash, bob);
+        secureContract.authorizeUser(v, r, s, bob, nonce, deadline);
         
-        // Verify Bob is now authorized
         assertTrue(secureContract.isAuthorized(bob));
     }
     
     function testRejectsInvalidSignature() public {
-        // Create a hash
-        bytes32 hash = secureContract.createAuthorizationHash(attacker, 1);
+        uint256 nonce = 1;
+        uint256 deadline = block.timestamp + 1 days;
         
-        // Use invalid signature components that will cause ecrecover to return address(0)
         uint8 v = 0;
         bytes32 r = bytes32(0);
         bytes32 s = bytes32(0);
         
-        // This should now fail due to the security fix
         vm.expectRevert("Invalid signature");
-        secureContract.authorizeUser(v, r, s, hash, attacker);
+        secureContract.authorizeUser(v, r, s, attacker, nonce, deadline);
         
-        // The attacker should not be authorized
         assertFalse(secureContract.isAuthorized(attacker));
     }
     
     function testRejectsMalformedSignature() public {
-        // Create a hash
-        bytes32 hash = secureContract.createAuthorizationHash(attacker, 2);
+        uint256 nonce = 2;
+        uint256 deadline = block.timestamp + 1 days;
         
-        // Use malformed signature components
-        uint8 v = 255; // Invalid v value
+        uint8 v = 255;
         bytes32 r = bytes32(uint256(1));
         bytes32 s = bytes32(uint256(1));
         
-        // This should also fail due to the security fix
         vm.expectRevert("Invalid signature");
-        secureContract.authorizeUser(v, r, s, hash, attacker);
+        secureContract.authorizeUser(v, r, s, attacker, nonce, deadline);
         
-        // The attacker should not be authorized
         assertFalse(secureContract.isAuthorized(attacker));
     }
     
@@ -77,29 +82,133 @@ contract SecureSignatureAttacksTest is Test {
     }
     
     function testReplayAttack() public {
-        // Create a valid signature
-        bytes32 hash = secureContract.createAuthorizationHash(bob, 1);
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(1, hash);
+        uint256 nonce = 1;
+        uint256 deadline = block.timestamp + 1 days;
+        bytes32 hash = secureContract.getAuthorizationHash(bob, nonce, deadline);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(ALICE_PK, hash);
         
-        // First authorization should succeed
-        secureContract.authorizeUser(v, r, s, hash, bob);
+        secureContract.authorizeUser(v, r, s, bob, nonce, deadline);
         
-        // Try to use the same signature again (should fail due to hash reuse protection)
         vm.expectRevert("Hash already used");
-        secureContract.authorizeUser(v, r, s, hash, bob);
+        secureContract.authorizeUser(v, r, s, bob, nonce, deadline);
     }
     
     function testProcessDataRequiresAuthorization() public {
-        // Try to process data without authorization
         vm.expectRevert("Not authorized");
         secureContract.processData("test data");
         
-        // Authorize the caller
-        bytes32 hash = secureContract.createAuthorizationHash(address(this), 1);
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(1, hash);
-        secureContract.authorizeUser(v, r, s, hash, address(this));
+        uint256 nonce = 1;
+        uint256 deadline = block.timestamp + 1 days;
+        bytes32 hash = secureContract.getAuthorizationHash(address(this), nonce, deadline);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(ALICE_PK, hash);
+        secureContract.authorizeUser(v, r, s, address(this), nonce, deadline);
         
-        // Now should be able to process data
         assertTrue(secureContract.processData("test data"));
     }
-} 
+
+    function testRejectsUnauthorizedSigner() public {
+        uint256 nonce = 7;
+        uint256 deadline = block.timestamp + 1 days;
+        bytes32 hash = secureContract.getAuthorizationHash(bob, nonce, deadline);
+
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(ATTACKER_PK, hash);
+
+        vm.expectRevert("Unauthorized signer");
+        secureContract.authorizeUser(v, r, s, bob, nonce, deadline);
+
+        assertFalse(secureContract.isAuthorized(bob));
+    }
+
+    function testRejectsExpiredSignature() public {
+        uint256 nonce = 8;
+        uint256 deadline = block.timestamp + 1 hours;
+        bytes32 hash = secureContract.getAuthorizationHash(bob, nonce, deadline);
+
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(ALICE_PK, hash);
+
+        vm.warp(deadline + 1);
+
+        vm.expectRevert("Signature expired");
+        secureContract.authorizeUser(v, r, s, bob, nonce, deadline);
+    }
+
+    function testAuthorizeUserWithECDSAValidSignature() public {
+        uint256 nonce = 10;
+        uint256 deadline = block.timestamp + 1 days;
+        bytes32 hash = secureContract.getAuthorizationHash(bob, nonce, deadline);
+        bytes memory signature = _signPacked(ALICE_PK, hash);
+
+        secureContract.authorizeUserWithECDSA(signature, bob, nonce, deadline);
+
+        assertTrue(secureContract.isAuthorized(bob));
+    }
+
+    function testAuthorizeUserWithECDSARejectsInvalidLength() public {
+        uint256 nonce = 11;
+        uint256 deadline = block.timestamp + 1 days;
+        bytes memory signature = hex"1234";
+
+        vm.expectRevert("Invalid signature length");
+        secureContract.authorizeUserWithECDSA(signature, bob, nonce, deadline);
+    }
+
+    function testAuthorizeUserWithECDSARejectsInvalidV() public {
+        uint256 nonce = 12;
+        uint256 deadline = block.timestamp + 1 days;
+        bytes32 hash = secureContract.getAuthorizationHash(bob, nonce, deadline);
+        bytes memory signature = _signPacked(ALICE_PK, hash);
+        signature[64] = bytes1(uint8(29));
+
+        vm.expectRevert("Invalid signature 'v' value");
+        secureContract.authorizeUserWithECDSA(signature, bob, nonce, deadline);
+    }
+
+    function testAuthorizeUserWithECDSARejectsMalleableS() public {
+        uint256 nonce = 13;
+        uint256 deadline = block.timestamp + 1 days;
+        bytes32 hash = secureContract.getAuthorizationHash(bob, nonce, deadline);
+        bytes memory signature = _signPacked(ALICE_PK, hash);
+
+        bytes32 highS = 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A1;
+        assembly {
+            mstore(add(signature, 64), highS)
+        }
+
+        vm.expectRevert("Invalid signature 's' value");
+        secureContract.authorizeUserWithECDSA(signature, bob, nonce, deadline);
+    }
+
+    function testAuthorizeUserWithECDSARejectsUnauthorizedSigner() public {
+        uint256 nonce = 14;
+        uint256 deadline = block.timestamp + 1 days;
+        bytes32 hash = secureContract.getAuthorizationHash(bob, nonce, deadline);
+        bytes memory signature = _signPacked(ATTACKER_PK, hash);
+
+        vm.expectRevert("Unauthorized signer");
+        secureContract.authorizeUserWithECDSA(signature, bob, nonce, deadline);
+    }
+
+    function testAuthorizeUserWithECDSARejectsReplay() public {
+        uint256 nonce = 15;
+        uint256 deadline = block.timestamp + 1 days;
+        bytes32 hash = secureContract.getAuthorizationHash(bob, nonce, deadline);
+        bytes memory signature = _signPacked(ALICE_PK, hash);
+
+        secureContract.authorizeUserWithECDSA(signature, bob, nonce, deadline);
+
+        vm.expectRevert("Hash already used");
+        secureContract.authorizeUserWithECDSA(signature, bob, nonce, deadline);
+    }
+
+    function testAuthorizeUserWithECDSARejectsExpiredSignature() public {
+        uint256 nonce = 16;
+        uint256 deadline = block.timestamp + 1 hours;
+        bytes32 hash = secureContract.getAuthorizationHash(bob, nonce, deadline);
+        bytes memory signature = _signPacked(ALICE_PK, hash);
+
+        vm.warp(deadline + 1);
+
+        vm.expectRevert("Signature expired");
+        secureContract.authorizeUserWithECDSA(signature, bob, nonce, deadline);
+    }
+}

@@ -52,9 +52,8 @@ contract VulnerableSignatureContract {
     
     /**
      * @dev Function that requires authorization
-     * @param data Some data to process
      */
-    function processData(string memory data) external view returns (bool) {
+    function processData(string memory /* data */) external view returns (bool) {
         require(authorizedUsers[msg.sender], "Not authorized");
         return true;
     }
